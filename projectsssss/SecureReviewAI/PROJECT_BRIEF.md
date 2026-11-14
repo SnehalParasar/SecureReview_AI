@@ -59,46 +59,53 @@ PR opened -> GitHub webhook -> Express server -> BullMQ queue (Redis)
   - `.env.example`: Contains placeholders for `PORT`, `WEBHOOK_PROXY_URL`, `GITHUB_APP_ID`, `GITHUB_WEBHOOK_SECRET`, and `GITHUB_PRIVATE_KEY_PATH`.
   - `.gitignore`: Configured to ignore `node_modules/`, environment files (`.env`, `.env.local`, `*.env`), private key files (`*.pem`, protecting `github-app-private-key.pem`), build/log artifacts (`logs/`, `*.log`, `dist/`, `build/`), and OS files (`.DS_Store`, `Thumbs.db`).
 
-### Day 2 (Fri 14 Nov)
+### Day 2 (Fri 13 - Sat 14 Nov)
 - **GitHub App authentication (`server/github.js`):**
-  - Created `server/github.js` using the `App` class from `octokit`.
-  - Reads `GITHUB_APP_ID` and the private key from `GITHUB_PRIVATE_KEY_PATH` at startup.
-  - Exports `getInstallationClient(installationId)` which calls `app.getInstallationOctokit(installationId)` and returns an installation-scoped authenticated Octokit.
-- **Webhook handler updated (`server/index.js`):**
-  - Imports `getInstallationClient` from `./github.js`.
-  - `pull_request` handler now reads `payload.installation.id`, calls `getInstallationClient`, and logs `authenticated as installation <id>`.
-  - Does NOT use `GITHUB_INSTALLATION_ID` from `.env`; installation ID is read exclusively from the webhook payload.
+  - Implemented `server/github.js` using the Octokit `App` class initialized with `GITHUB_APP_ID` and private key read from `GITHUB_PRIVATE_KEY_PATH`.
+  - Exports `getInstallationClient(installationId)` returning an authenticated installation-scoped Octokit client.
+  - Updated `server/index.js` to read `payload.installation.id` dynamically from the webhook payload (never from `.env`) and authenticate per-installation.
+- **PR diff fetching with pagination (`server/diff.js`):**
+  - Implemented `server/diff.js` exporting `fetchPrFiles(octokit, owner, repo, pullNumber)`.
+  - Uses `octokit.paginate` with `octokit.rest.pulls.listFiles` (`per_page: 100`) to retrieve all changed files across pages without truncating large PRs.
+  - Skips files without a `patch` (binaries, diffs exceeding GitHub's size limits) and logs skipped files.
+  - Returns array of `{ filename, status, patch, additions, deletions }`.
+  - Verified on a 37-file PR; handles renamed, removed, modified, and added statuses.
+- **Placeholder PR comment (`server/comment.js`):**
+  - Implemented `server/comment.js` exporting `postPlaceholderComment(octokit, owner, repo, prNumber, fileCount)`.
+  - Calls `octokit.rest.issues.createComment` to post top-level comment: `"SecureReview AI received this PR and found N changed files."`.
+  - Returns `html_url` of the comment.
+- **Webhook event handling & guards (`server/index.js`):**
+  - Subscribes to `pull_request` events (`opened`, `synchronize`, `reopened`).
+  - Guards against bot comment infinite loops by skipping events where `payload.sender?.type === 'Bot'` or login contains `[bot]`.
+  - Deduplicates on `synchronize` by verifying `payload.before !== payload.after` and validating against an in-memory head-SHA cache (`lastCommentedSha`).
+- **Testing on test repo:**
+  - Tested against `SnehalParasar/SecureReview_Test_REPO` PRs (including a 4-file PR, a 37-file PR, and across renamed/removed/modified/added file statuses).
 
-**Next:**
-- Day 2 (cont.): Fetch PR diff/files using the installation client, post a placeholder comment.
+**Next (Day 3):**
+- File filtering (skip lockfiles, minified files, binaries, removed files, patches above a size limit), then the rule-based scanner.
 
-### Day 2 cont. — PR diff fetching (`server/diff.js`)
-- **`server/diff.js`** — `fetchPrFiles(octokit, owner, repo, pullNumber)`:
-  - Uses `octokit.paginate` with `pulls.listFiles` (100 per page) for full pagination.
-  - Strips files with no `patch` (binary / too-large diffs) and logs each skip.
-  - Returns `[{ filename, status, patch, additions, deletions }]`.
-- **`server/index.js`** updated:
-  - Now assigns the returned octokit from `getInstallationClient`.
-  - Calls `fetchPrFiles` with owner/repo split from `payload.repository.full_name`.
-  - Logs each patchable file: `filename  status=…  +N/-N  patch_length=N`.
+**Known issues / TODO:**
+- Bot posts a new comment on every event; needs update-in-place or dedup.
+- .env.example missing MONGODB_URI, GEMINI_API_KEY, REDIS_URL.
+- app.listen() runs on import; split app.js and server start before adding tests.
+- Webhook handler should log ignored actions.
 
-**Next:**
-- Post confirmed findings as inline PR review comments.
+## Test repo
+`SnehalParasar/SecureReview_Test_REPO`, with branches:
+- `pr-mixed-vulns`
+- `pr-clean-refactor`
+- `pr-tricky-safe`
+- `pr-tricky-vulnerable`
+- `pr-prompt-injection`
+- `pr-large-diff`
+- `pr-rename-delete` (base: `rename-base`)
+- `pr-non-code`
+- `pr-sync-test`
 
-### Day 2 cont. — Placeholder PR comment (`server/comment.js`)
-- **`server/comment.js`** — `postPlaceholderComment(octokit, owner, repo, prNumber, fileCount)`:
-  - Calls `octokit.rest.issues.createComment` (PRs share the Issues API number space).
-  - Posts exact specified text: `"SecureReview AI received this PR and found N changed files."`
-  - Returns the `html_url` of the created comment.
-- **Bot loop prevention & synchronize deduplication (`server/index.js`):**
-  - Ignores events where `payload.sender?.type === 'Bot'` or login contains `[bot]`, preventing cycles from bot actions or comments.
-  - On `synchronize`, checks `payload.before !== payload.after` and validates against a head-SHA cache (`lastCommentedSha`), posting a new comment only when the PR code is updated with new commits.
-  - Logs the resulting comment URL upon success.
+`eval-manifest/expected.json` there is the ground truth for evaluation.
 
-**Next:**
-- Stage 1: rule-based secret/SQL/JWT/eval scanner over the fetched patches.
-
-**Known issues:**
-- `.env.example` is missing some environment variables that appear in `.env` (`GITHUB_INSTALLATION_ID`, `MONGODB_URI`, `GEMINI_API_KEY`, `REDIS_URL`).
-- `server/index.js` only logs PR events to stdout; BullMQ queue integration and worker pipeline processing are not yet wired up.
-- `server/index.js` immediately starts listening on `PORT` when imported via `app.listen()`, rather than exporting `app` separately from server bootstrap.
+## Rules for all prompts
+- Never hardcode file names, repo names, line numbers, test strings, keys or model names from the test repo; write general patterns only.
+- Models and keys come from .env.
+- Evaluate on a held-out set as well as the test repo, to avoid inflated numbers.
+- Keep Gemini free-tier usage low: skip big files, cache, back off on 429.
