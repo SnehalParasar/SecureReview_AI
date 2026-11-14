@@ -59,8 +59,44 @@ PR opened -> GitHub webhook -> Express server -> BullMQ queue (Redis)
   - `.env.example`: Contains placeholders for `PORT`, `WEBHOOK_PROXY_URL`, `GITHUB_APP_ID`, `GITHUB_WEBHOOK_SECRET`, and `GITHUB_PRIVATE_KEY_PATH`.
   - `.gitignore`: Configured to ignore `node_modules/`, environment files (`.env`, `.env.local`, `*.env`), private key files (`*.pem`, protecting `github-app-private-key.pem`), build/log artifacts (`logs/`, `*.log`, `dist/`, `build/`), and OS files (`.DS_Store`, `Thumbs.db`).
 
+### Day 2 (Fri 14 Nov)
+- **GitHub App authentication (`server/github.js`):**
+  - Created `server/github.js` using the `App` class from `octokit`.
+  - Reads `GITHUB_APP_ID` and the private key from `GITHUB_PRIVATE_KEY_PATH` at startup.
+  - Exports `getInstallationClient(installationId)` which calls `app.getInstallationOctokit(installationId)` and returns an installation-scoped authenticated Octokit.
+- **Webhook handler updated (`server/index.js`):**
+  - Imports `getInstallationClient` from `./github.js`.
+  - `pull_request` handler now reads `payload.installation.id`, calls `getInstallationClient`, and logs `authenticated as installation <id>`.
+  - Does NOT use `GITHUB_INSTALLATION_ID` from `.env`; installation ID is read exclusively from the webhook payload.
+
 **Next:**
-- Day 2: GitHub App auth with installation client, fetch PR files, post a placeholder comment.
+- Day 2 (cont.): Fetch PR diff/files using the installation client, post a placeholder comment.
+
+### Day 2 cont. — PR diff fetching (`server/diff.js`)
+- **`server/diff.js`** — `fetchPrFiles(octokit, owner, repo, pullNumber)`:
+  - Uses `octokit.paginate` with `pulls.listFiles` (100 per page) for full pagination.
+  - Strips files with no `patch` (binary / too-large diffs) and logs each skip.
+  - Returns `[{ filename, status, patch, additions, deletions }]`.
+- **`server/index.js`** updated:
+  - Now assigns the returned octokit from `getInstallationClient`.
+  - Calls `fetchPrFiles` with owner/repo split from `payload.repository.full_name`.
+  - Logs each patchable file: `filename  status=…  +N/-N  patch_length=N`.
+
+**Next:**
+- Post confirmed findings as inline PR review comments.
+
+### Day 2 cont. — Placeholder PR comment (`server/comment.js`)
+- **`server/comment.js`** — `postPlaceholderComment(octokit, owner, repo, prNumber, fileCount)`:
+  - Calls `octokit.rest.issues.createComment` (PRs share the Issues API number space).
+  - Posts exact specified text: `"SecureReview AI received this PR and found N changed files."`
+  - Returns the `html_url` of the created comment.
+- **Bot loop prevention & synchronize deduplication (`server/index.js`):**
+  - Ignores events where `payload.sender?.type === 'Bot'` or login contains `[bot]`, preventing cycles from bot actions or comments.
+  - On `synchronize`, checks `payload.before !== payload.after` and validates against a head-SHA cache (`lastCommentedSha`), posting a new comment only when the PR code is updated with new commits.
+  - Logs the resulting comment URL upon success.
+
+**Next:**
+- Stage 1: rule-based secret/SQL/JWT/eval scanner over the fetched patches.
 
 **Known issues:**
 - `.env.example` is missing some environment variables that appear in `.env` (`GITHUB_INSTALLATION_ID`, `MONGODB_URI`, `GEMINI_API_KEY`, `REDIS_URL`).

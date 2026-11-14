@@ -1,10 +1,12 @@
-// Step 1: Import required dependencies
-import express from 'express';
-import dotenv from 'dotenv';
-import { Webhooks } from '@octokit/webhooks';
+// Step 1: Load environment variables first before importing modules that depend on them
+import 'dotenv/config';
 
-// Step 2: Load environment variables from .env file
-dotenv.config();
+// Step 2: Import required dependencies
+import express from 'express';
+import { Webhooks } from '@octokit/webhooks';
+import { getInstallationClient } from './github.js';
+import { fetchPrFiles } from './diff.js';
+import { postPlaceholderComment } from './comment.js';
 
 // Step 3: Initialize Express application and define server port
 const app = express();
@@ -21,16 +23,76 @@ const webhooks = new Webhooks({
   secret: WEBHOOK_SECRET || '',
 });
 
+// Track last commented commit SHA per PR to ensure comments only post when code is updated
+const lastCommentedSha = new Map();
+
 // Step 6: Handle pull_request event for actions: opened, synchronize, and reopened
-// Logs repository name, PR number, and action to the terminal
+// Reads installation.id from the payload, authenticates as that installation,
+// then logs repository name, PR number, action, and the authenticated installation.
 webhooks.on(
   ['pull_request.opened', 'pull_request.synchronize', 'pull_request.reopened'],
-  ({ id, name, payload }) => {
+  async ({ id, name, payload }) => {
     const repoName = payload.repository?.full_name || payload.repository?.name || 'unknown';
     const prNumber = payload.pull_request?.number;
     const action = payload.action;
+    const installationId = payload.installation?.id;
+    const headSha = payload.pull_request?.head?.sha;
+    const prKey = `${repoName}#${prNumber}`;
 
     console.log(`Repository: ${repoName}, PR #${prNumber}, Action: ${action}`);
+
+    // Step 6a: Avoid commenting on pull_request events triggered by bots (e.g. bot's own comments or actions)
+    if (payload.sender?.type === 'Bot' || payload.sender?.login?.includes('[bot]')) {
+      console.log(`[comment] Skipping event triggered by bot ${payload.sender?.login}`);
+      return;
+    }
+
+    // Step 6b: On synchronize, only post a new comment if the PR was actually updated
+    if (action === 'synchronize') {
+      if (payload.before && payload.after && payload.before === payload.after) {
+        console.log(`[comment] PR #${prNumber} synchronize event has identical before/after SHA — skipping comment`);
+        return;
+      }
+      if (headSha && lastCommentedSha.get(prKey) === headSha) {
+        console.log(`[comment] PR #${prNumber} synchronize event already processed for head SHA ${headSha} — skipping comment`);
+        return;
+      }
+    }
+
+    if (!installationId) {
+      console.warn('No installation.id in webhook payload — skipping authentication');
+      return;
+    }
+
+    try {
+      // Authenticate as this specific GitHub App installation
+      const octokit = await getInstallationClient(installationId);
+      console.log(`authenticated as installation ${installationId}`);
+
+      // Parse owner and repo from the full_name ("owner/repo")
+      const [owner, repo] = repoName.split('/');
+
+      // Fetch changed files for this PR
+      const files = await fetchPrFiles(octokit, owner, repo, prNumber);
+
+      console.log(`[diff] PR #${prNumber} — ${files.length} patchable file(s):`);
+      for (const file of files) {
+        console.log(
+          `  ${file.filename}  status=${file.status}  +${file.additions}/-${file.deletions}  patch_length=${file.patch.length}`
+        );
+      }
+
+      // Post placeholder comment on the PR
+      const commentUrl = await postPlaceholderComment(octokit, owner, repo, prNumber, files.length);
+      console.log(`[comment] Posted placeholder comment: ${commentUrl}`);
+
+      // Record head SHA after successful comment
+      if (headSha) {
+        lastCommentedSha.set(prKey, headSha);
+      }
+    } catch (err) {
+      console.error(`Failed to authenticate as installation ${installationId}:`, err.message);
+    }
   }
 );
 
