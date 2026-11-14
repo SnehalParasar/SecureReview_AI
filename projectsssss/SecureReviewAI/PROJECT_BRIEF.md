@@ -43,4 +43,26 @@ PR opened -> GitHub webhook -> Express server -> BullMQ queue (Redis)
 /dashboard React app (later)
 
 ## Progress log
-(Update after each day: what works, what is next, known issues)
+
+### Day 1 (Thu 12 Nov)
+- **Project skeleton and folder structure:**
+  - Initialized Node.js ES module project (`package.json`).
+  - Created directory layout per brief: `server/`, `worker/` (`.gitkeep`), `rag/` (`.gitkeep`), `agents/` (`.gitkeep`), `eval/` (`.gitkeep`), and `dashboard/` (`.gitkeep`).
+- **Express server and /health route:**
+  - `server/index.js`: Express server configured on `PORT` (defaults to 3000), providing `GET /health` which returns `{ status: 'ok' }`.
+- **POST /webhook route with signature verification:**
+  - `server/index.js`: Added `POST /webhook` route using `@octokit/webhooks`. Uses `express.raw({ type: '*/*' })` to preserve the raw request body Buffer for HMAC verification. Validates `x-hub-signature-256` against `GITHUB_WEBHOOK_SECRET`, rejecting invalid or missing signatures with HTTP 401. Handles `pull_request` event for actions `opened`, `synchronize`, and `reopened`, logging repository name, PR number, and action to the console.
+- **smee-client forwarding script:**
+  - `server/smee.js`: Created forwarding script using `smee-client` to forward webhooks from `WEBHOOK_PROXY_URL` to `http://localhost:PORT/webhook`.
+  - Configured npm scripts: `npm run smee` (and alias `npm run webhook:proxy`).
+- **.env.example variables and .gitignore entries:**
+  - `.env.example`: Contains placeholders for `PORT`, `WEBHOOK_PROXY_URL`, `GITHUB_APP_ID`, `GITHUB_WEBHOOK_SECRET`, and `GITHUB_PRIVATE_KEY_PATH`.
+  - `.gitignore`: Configured to ignore `node_modules/`, environment files (`.env`, `.env.local`, `*.env`), private key files (`*.pem`, protecting `github-app-private-key.pem`), build/log artifacts (`logs/`, `*.log`, `dist/`, `build/`), and OS files (`.DS_Store`, `Thumbs.db`).
+
+**Next:**
+- Day 2: GitHub App auth with installation client, fetch PR files, post a placeholder comment.
+
+**Known issues:**
+- `.env.example` is missing some environment variables that appear in `.env` (`GITHUB_INSTALLATION_ID`, `MONGODB_URI`, `GEMINI_API_KEY`, `REDIS_URL`).
+- `server/index.js` only logs PR events to stdout; BullMQ queue integration and worker pipeline processing are not yet wired up.
+- `server/index.js` immediately starts listening on `PORT` when imported via `app.listen()`, rather than exporting `app` separately from server bootstrap.
